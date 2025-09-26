@@ -537,30 +537,29 @@ def create_team_trends_small_multiples(df):
     return fig
 
 def create_duplicates_heatmap(df, top_n_jobids=20):
-    """Heatmap of top duplicated JobIDs across teams"""
+    """Create heatmap of duplicate JobIDs across teams"""
     dup_counts = df.groupby("JobID").size().reset_index(name="Count")
-    dup_jobids = dup_counts[dup_counts["Count"] > 1].sort_values("Count", ascending=False).head(top_n_jobids)["JobID"].tolist()
-    if len(dup_jobids) == 0:
-        return None
+    dup_jobids = dup_counts[dup_counts["Count"] > 1]["JobID"].head(top_n_jobids)
 
-    # Filter original df for these jobids and create pivot
-    pivot = df[df["JobID"].isin(dup_jobids)].pivot_table(index="JobID", columns="Source", values="JobID", aggfunc="count", fill_value=0)
+    df["dup_flag"] = 1  # temporary marker for counting
+    pivot = df[df["JobID"].isin(dup_jobids)].pivot_table(
+        index="JobID",
+        columns="Source",
+        values="dup_flag",
+        aggfunc="sum",
+        fill_value=0
+    )
+
     if pivot.empty:
         return None
 
-    # Sort rows by total duplicates
-    pivot["total"] = pivot.sum(axis=1)
-    pivot = pivot.sort_values("total", ascending=False).drop(columns=["total"])
-    heat_vals = pivot.values
     fig = px.imshow(
-        heat_vals,
-        labels=dict(x="Team", y="JobID", color="Count"),
-        x=pivot.columns,
-        y=pivot.index,
+        pivot,
+        text_auto=True,
         aspect="auto",
-        title="Duplicate JobID counts by Team (top duplicated JobIDs)"
+        color_continuous_scale="Reds",
+        title="🔍 Duplicate JobID Heatmap (Top Duplicates across Teams)"
     )
-    fig.update_layout(height=450)
     return fig
 
 # ---------------- Main Streamlit App ----------------
