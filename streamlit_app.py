@@ -644,7 +644,7 @@ def main():
 
                     # Top performers per team
                     st.subheader("🌟 Top Performers per Team")
-                    top_perf_fig = create_team_top_performers(filtered_df, top_n=top_n if top_n<=10 else 10)
+                    top_perf_fig = create_team_top_performers(filtered_df, top_n=top_n if top_n<=20 else 20)
                     if top_perf_fig is not None:
                         st.plotly_chart(top_perf_fig, use_container_width=True)
 
