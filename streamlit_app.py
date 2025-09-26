@@ -606,7 +606,7 @@ def main():
                     date_range = None
 
                 # Top N agents
-                top_n = st.slider("Top N Agents to Show", 3, 50, 10)
+                top_n = st.slider("Top N Agents to Show", 3, 30, 10)
 
             # Apply filters
             filtered_df = df.copy()
