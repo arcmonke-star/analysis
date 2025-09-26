@@ -457,6 +457,11 @@ def main():
     st.markdown('<div class="main-header">📊 GTM Team Performance Dashboard</div>', unsafe_allow_html=True)
     
     # Sidebar for file upload and controls
+    # Main Streamlit App
+def main():
+    st.markdown('<div class="main-header">📊 GTM Team Performance Dashboard</div>', unsafe_allow_html=True)
+
+    # Sidebar: file upload
     with st.sidebar:
         st.header("📁 Data Upload")
         uploaded_file = st.file_uploader(
@@ -464,25 +469,27 @@ def main():
             type=['xlsx', 'xls'],
             help="Upload your GTM team performance Excel file"
         )
-        
-        if uploaded_file is not None:
-            st.success(f"File uploaded: {uploaded_file.name}")
-            
-            # Load and process data
-            with st.spinner("Processing data..."):
-                df = load_and_process_data(uploaded_file)
-            
-            if df is not None:
-                st.success(f"✅ Processed {len(df):,} records")
-                
-                # Filters
+
+    # If a file is uploaded
+    if uploaded_file is not None:
+        st.success(f"File uploaded: {uploaded_file.name}")
+
+        # Load and process
+        with st.spinner("Processing data..."):
+            df = load_and_process_data(uploaded_file)
+
+        if df is not None:
+            st.success(f"✅ Processed {len(df):,} records")
+
+            # Sidebar filters
+            with st.sidebar:
                 st.header("🔍 Filters")
-                
+
                 # Team filter
                 teams = ['All'] + list(df['Source'].unique())
                 selected_team = st.selectbox("Select Team", teams)
-                
-                # Date range filter
+
+                # Date filter
                 if not df["Date"].isna().all():
                     date_range = st.date_input(
                         "Date Range",
@@ -490,85 +497,82 @@ def main():
                         min_value=df["Date"].min().date(),
                         max_value=df["Date"].max().date()
                     )
-                
+                else:
+                    date_range = None
+
                 # Top N agents
                 top_n = st.slider("Top N Agents to Show", 5, 30, 10)
-                
-                # Apply filters
-                filtered_df = df.copy()
-                if selected_team != 'All':
-                    filtered_df = filtered_df[filtered_df['Source'] == selected_team]
-                
-                if not df["Date"].isna().all() and len(date_range) == 2:
-                    filtered_df = filtered_df[
-                        (filtered_df['Date'].dt.date >= date_range[0]) & 
-                        (filtered_df['Date'].dt.date <= date_range[1])
-                    ]
-                
-                # Main dashboard
-                if not filtered_df.empty:
-                    # Performance metrics
-                    st.header("📊 Key Metrics")
-                    create_performance_metrics(filtered_df)
-                    
-                    # Agent performance
-                    st.header("👤 Agent Performance")
-                    agent_chart = create_agent_performance_chart(filtered_df, top_n)
-                    st.plotly_chart(agent_chart, use_container_width=True)
-                    
-                    # Team comparison (only show if looking at all teams)
-                    if selected_team == 'All':
-                        st.header("🏆 Team Comparison")
-                        team_chart = create_team_comparison(filtered_df)
-                        st.plotly_chart(team_chart, use_container_width=True)
-                    
-                    # Time trends
-                    st.header("📈 Time Trends")
-                    trend_chart = create_time_trends(filtered_df)
-                    if trend_chart:
-                        st.plotly_chart(trend_chart, use_container_width=True)
-                    
-                    # Duplicate analysis
-                    st.header("🔍 Duplicate Analysis")
-                    dup_result = create_duplicate_analysis(filtered_df)
-                    if dup_result:
-                        dup_chart, dup_data = dup_result
-                        st.plotly_chart(dup_chart, use_container_width=True)
-                        
-                        with st.expander("View Duplicate Details"):
-                            st.dataframe(dup_data)
-                    
-                    # Detailed data view
-                    with st.expander("🔍 View Raw Data"):
-                        st.dataframe(
-                            filtered_df.head(100),
-                            use_container_width=True
-                        )
-                        
-                        if len(filtered_df) > 100:
-                            st.info(f"Showing first 100 rows of {len(filtered_df):,} total records")
-                
-                else:
-                    st.warning("No data matches the current filters.")
-        
-        else:
-            st.info("👆 Please upload an Excel file to begin analysis")
-            
-            # Show sample data format
-            with st.expander("📋 Expected Data Format"):
-                st.markdown("""
-                **Your Excel file should contain sheets with:**
-                
-                **For UFAC format (wide):**
-                - Name, Date columns
-                - Repeating job/case/comment columns
-                
-                **For AA format (long):**
-                - Name, Date, JobID, CaseCompletion columns
-                
-                **Supported sheet naming:**
-                - GTM AA, GTM UFAC, etc.
-                """)
+
+            # Apply filters
+            filtered_df = df.copy()
+            if selected_team != 'All':
+                filtered_df = filtered_df[filtered_df['Source'] == selected_team]
+            if date_range and len(date_range) == 2:
+                filtered_df = filtered_df[
+                    (filtered_df['Date'].dt.date >= date_range[0]) &
+                    (filtered_df['Date'].dt.date <= date_range[1])
+                ]
+
+            # ----------------- MAIN DASHBOARD -----------------
+            if not filtered_df.empty:
+                # Metrics
+                st.header("📊 Key Metrics")
+                create_performance_metrics(filtered_df)
+
+                # Agent performance
+                st.header("👤 Agent Performance")
+                agent_chart = create_agent_performance_chart(filtered_df, top_n)
+                st.plotly_chart(agent_chart, use_container_width=True)
+
+                # Team comparison (only if all teams selected)
+                if selected_team == 'All':
+                    st.header("🏆 Team Comparison")
+                    team_chart = create_team_comparison(filtered_df)
+                    st.plotly_chart(team_chart, use_container_width=True)
+
+                # Trends
+                st.header("📈 Time Trends")
+                trend_chart = create_time_trends(filtered_df)
+                if trend_chart:
+                    st.plotly_chart(trend_chart, use_container_width=True)
+
+                # Duplicates
+                st.header("🔍 Duplicate Analysis")
+                dup_result = create_duplicate_analysis(filtered_df)
+                if dup_result:
+                    dup_chart, dup_data = dup_result
+                    st.plotly_chart(dup_chart, use_container_width=True)
+                    with st.expander("View Duplicate Details"):
+                        st.dataframe(dup_data)
+
+                # Raw data view
+                with st.expander("🔍 View Raw Data"):
+                    st.dataframe(filtered_df.head(100), use_container_width=True)
+                    if len(filtered_df) > 100:
+                        st.info(f"Showing first 100 rows of {len(filtered_df):,} total records")
+
+            else:
+                st.warning("No data matches the current filters.")
+
+    # If no file is uploaded
+    else:
+        st.info("👆 Please upload an Excel file to begin analysis")
+
+        # Show expected data format
+        with st.expander("📋 Expected Data Format"):
+            st.markdown("""
+            **Your Excel file should contain sheets with:**
+
+            **For UFAC format (wide):**
+            - Name, Date columns
+            - Repeating job/case/comment columns
+
+            **For AA format (long):**
+            - Name, Date, JobID, CaseCompletion columns
+
+            **Supported sheet naming:**
+            - GTM AA, GTM UFAC, etc.
+            """)
 
 if __name__ == "__main__":
     main()
