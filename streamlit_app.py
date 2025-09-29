@@ -1,51 +1,29 @@
-import streamlit as st
-import os
-import re
+# Full updated Colab-ready analysis script
+# - Correctly parses GTM UFAC (wide repeating JobID/Case/Comments)
+# - Parses GTM AA (long/wide) robustly
+# - Normalizes JobIDs, removes header artifacts
+# - Produces team + agent analyses (duplicates, completion, reliability, trends)
+# - Colab: mounts Drive, reads the first Excel in folder_path
+
+import os, re
 from decimal import Decimal, InvalidOperation
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from datetime import datetime, timedelta
+from google.colab import drive
+from IPython.display import display
 
-# Page config
-st.set_page_config(
-    page_title="GTM Team Performance Dashboard",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# ---------------- PARAMETERS ----------------
+top_n = 10
+data_folder = "/content/drive/MyDrive/Colab Notebooks/Workflow"
 
-# Custom CSS for better styling
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 3rem;
-        font-weight: bold;
-        text-align: center;
-        color: #1f77b4;
-        margin-bottom: 2rem;
-    }
-    .metric-card {
-        background-color: #f0f2f6;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        border-left: 4px solid #1f77b4;
-    }
-    .stMetric {
-        background-color: white;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-</style>
-""", unsafe_allow_html=True)
+# ---------------- SETUP ----------------
+drive.mount('/content/drive', force_remount=False)
+sns.set(style="whitegrid")
+plt.rcParams.update({'figure.autolayout': True})
 
-# Helper functions
-@st.cache_data
+# ---------------- HELPERS ----------------
 def normalize_jobid(val):
     if pd.isna(val):
         return None
@@ -65,26 +43,57 @@ def normalize_jobid(val):
     s = re.sub(r'\.0+$', '', s)
     return s
 
-@st.cache_data
+def safe_show():
+    try:
+        plt.show()
+    except Exception:
+        pass
+
+def is_header_like_name(x):
+    if pd.isna(x):
+        return False
+    s = str(x).strip().lower()
+    return s in {"name","jobid","casecompletion","comments","completed","none","nan","job id"}
+
+# ---------------- LOCATE EXCEL ----------------
+if not os.path.exists(data_folder):
+    raise FileNotFoundError(f"Folder not found: {data_folder}")
+
+xls_files = [f for f in os.listdir(data_folder) if f.lower().endswith(('.xlsx', '.xls'))]
+if not xls_files:
+    raise FileNotFoundError(f"No Excel files found in {data_folder}")
+
+file_path = os.path.join(data_folder, xls_files[0])
+print("Using file:", file_path)
+
+# ---------------- PARSERS ----------------
 def find_repeating_groups(cols_lower):
+    """
+    Identify positions of repeating groups like [job*, case*, comment*] in the column list
+    Returns list of tuples (job_idx, case_idx_or_None, comment_idx_or_None)
+    """
     groups = []
     i = 0
     n = len(cols_lower)
     while i < n:
         col = cols_lower[i]
-        if "job" in col:
+        if "job" in col:  # job column detected
             j = i
+            # look ahead for a 'case' column
             case_idx = None
             comment_idx = None
+            # find nearest case column after j (within next 6 cols)
             for k in range(i+1, min(n, i+6)):
                 if "case" in cols_lower[k] or "completion" in cols_lower[k]:
                     case_idx = k
+                    # find comment after case
                     for m in range(k+1, min(n, k+6)):
                         if "comment" in cols_lower[m]:
                             comment_idx = m
                             break
                     break
             groups.append((j, case_idx, comment_idx))
+            # advance i — if case exists, jump after it, else just next
             if case_idx:
                 i = case_idx + 1
             else:
@@ -93,30 +102,43 @@ def find_repeating_groups(cols_lower):
             i += 1
     return groups
 
-@st.cache_data
 def parse_sheet_generic(df_raw, sheet_name):
+    """
+    Universal sheet parser:
+    - Detect repeating job groups -> treat as wide and unpivot
+    - Else try to find Name/Date/JobID/CaseCompletion columns (long format)
+    """
     rows = []
+    # normalize column names for searching
     cols = list(df_raw.columns)
     cols_lower = [str(c).strip().lower() for c in cols]
+
+    # detect repeating groups
     groups = find_repeating_groups(cols_lower)
 
+    # If many job groups (more than 1), treat as wide repeating layout (UFAC)
     if len(groups) >= 1 and len(groups) > 1 or ("ufac" in sheet_name.lower() and len(groups) >= 1):
+        # For each row, iterate all groups
         for idx, row in df_raw.iterrows():
+            # Attempt to find name and date from obvious columns if present
             name = None
             date = None
+            # heuristics to find name/date columns: first column containing 'name' or first col
             for c, low in zip(cols, cols_lower):
                 if "name" in low:
                     name = row.get(c)
                     break
             if name is None:
+                # fallback: first column value
                 name = row.iloc[0] if df_raw.shape[1] > 0 else None
             for c, low in zip(cols, cols_lower):
                 if "date" in low:
                     date = row.get(c)
                     break
             if date is None and df_raw.shape[1] > 1:
-                date = row.iloc[1]
+                date = row.iloc[1]  # common layout: name, date, then jobs
 
+            # For each group extract job/case/comment
             for (jidx, cidx, commidx) in groups:
                 try:
                     job_col = cols[jidx]
@@ -125,10 +147,12 @@ def parse_sheet_generic(df_raw, sheet_name):
                     job_val = None
                 if pd.isna(job_val) or str(job_val).strip() == "":
                     continue
+                # case
                 case_val = None
                 if cidx is not None:
                     case_col = cols[cidx]
                     case_val = row.get(case_col)
+                # comment
                 comment_val = None
                 if commidx is not None:
                     comment_col = cols[commidx]
@@ -143,7 +167,8 @@ def parse_sheet_generic(df_raw, sheet_name):
                 })
         return rows
 
-    # Long format detection
+    # Else - try long format: find Name, Date, JobID, CaseCompletion columns by header keywords
+    # Map best-match columns
     name_col = None; date_col = None; job_col = None; case_col = None; comment_col = None
     for c, low in zip(cols, cols_lower):
         if name_col is None and "name" in low:
@@ -157,6 +182,7 @@ def parse_sheet_generic(df_raw, sheet_name):
         if comment_col is None and "comment" in low:
             comment_col = c
 
+    # If job_col found, treat as long: each row -> one job
     if job_col is not None:
         for _, row in df_raw.iterrows():
             job_val = row.get(job_col)
@@ -176,7 +202,7 @@ def parse_sheet_generic(df_raw, sheet_name):
             })
         return rows
 
-    # Fallback
+    # As fallback, try headerless / first-col-name layout (name, date, then many job ids)
     for _, row in df_raw.iterrows():
         name = row.iloc[0] if df_raw.shape[1] > 0 else None
         date = row.iloc[1] if df_raw.shape[1] > 1 else None
@@ -193,9 +219,39 @@ def parse_sheet_generic(df_raw, sheet_name):
             })
     return rows
 
-@st.cache_data
+# ---------------- READ ALL SHEETS ----------------
+xls = pd.ExcelFile(file_path)
+all_rows = []
+for sheet in xls.sheet_names:
+    print("Processing sheet:", sheet)
+    # read with header=0 - we need raw headers to detect repeating patterns
+    try:
+        df_raw = pd.read_excel(file_path, sheet_name=sheet, dtype=str, header=0)
+    except Exception as e:
+        # fallback try header=None
+        df_raw = pd.read_excel(file_path, sheet_name=sheet, dtype=str, header=None)
+    parsed = parse_sheet_generic(df_raw, sheet)
+    all_rows.extend(parsed)
+
+# ---------------- BUILD DF & CLEAN ----------------
+df = pd.DataFrame(all_rows, columns=["Source","Name","Date","JobID","CaseCompletion","Comments"])
+# normalize
+df["Date"] = pd.to_datetime(df["Date"], errors="coerce", dayfirst=True)
+df["JobID"] = df["JobID"].astype(str).str.strip()
+# drop header-like rows and empty job ids
+df = df[~df["JobID"].str.lower().isin({"jobid","casecompletion","completed","comments","none","nan","job id"})]
+df = df[~df["Name"].astype(str).str.lower().isin({"name","nan","none"})]
+df = df.dropna(subset=["JobID"]).reset_index(drop=True)
+
+print("\nSample cleaned data (first 12 rows):")
+display(df.head(12))
+
+# ---------------- DERIVED FIELDS ----------------
+# Robust hybrid detection that handles both AA and UFAC varieties
 def detect_completed_marker(row):
     source = row["Source"]
+
+    # ------------------- GTM AA -------------------
     if "aa" in source.lower():
         s = row["CaseCompletion"]
         if s is None or pd.isna(s):
@@ -204,371 +260,207 @@ def detect_completed_marker(row):
         if "completed" in s_lower:
             return "not" not in s_lower and "incomplete" not in s_lower
         return False
+
+    # ------------------- GTM UFAC -------------------
     if "ufac" in source.lower():
         jobid = str(row["JobID"]).strip().lower()
+        # If JobID is purely numeric, it's just an ID → not a completion marker
         if jobid.isnumeric():
             return False
+        # Otherwise, it's an outcome string → count as completed
         return True
+
+    # ------------------- Default -------------------
     return False
 
-@st.cache_data
-def load_and_process_data(uploaded_file):
-    """Load and process the uploaded Excel file"""
-    try:
-        xls = pd.ExcelFile(uploaded_file)
-        all_rows = []
-        
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        for i, sheet in enumerate(xls.sheet_names):
-            status_text.text(f'Processing sheet: {sheet}')
-            try:
-                df_raw = pd.read_excel(uploaded_file, sheet_name=sheet, dtype=str, header=0)
-            except Exception:
-                df_raw = pd.read_excel(uploaded_file, sheet_name=sheet, dtype=str, header=None)
-            
-            parsed = parse_sheet_generic(df_raw, sheet)
-            all_rows.extend(parsed)
-            progress_bar.progress((i + 1) / len(xls.sheet_names))
-        
-        progress_bar.empty()
-        status_text.empty()
-        
-        # Build DataFrame
-        df = pd.DataFrame(all_rows, columns=["Source","Name","Date","JobID","CaseCompletion","Comments"])
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce", dayfirst=True)
-        df["JobID"] = df["JobID"].astype(str).str.strip()
-        
-        # Clean data
-        df = df[~df["JobID"].str.lower().isin({"jobid","casecompletion","completed","comments","none","nan","job id"})]
-        df = df[~df["Name"].astype(str).str.lower().isin({"name","nan","none"})]
-        df = df.dropna(subset=["JobID"]).reset_index(drop=True)
-        
-        # Add completion marker
-        df["IsCompleted"] = df.apply(detect_completed_marker, axis=1)
-        
-        return df
-    except Exception as e:
-        st.error(f"Error processing file: {str(e)}")
-        return None
+df["IsCompleted"] = df.apply(detect_completed_marker, axis=1)
 
-def create_performance_metrics(df):
-    """Create performance metrics cards"""
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric(
-            label="📋 Total Tasks",
-            value=f"{len(df):,}",
-            delta=f"{df['IsCompleted'].sum():,} completed"
-        )
-    
-    with col2:
-        unique_jobs = df["JobID"].nunique()
-        duplicates = len(df) - unique_jobs
-        st.metric(
-            label="🔢 Unique Jobs",
-            value=f"{unique_jobs:,}",
-            delta=f"{duplicates:,} duplicates" if duplicates > 0 else "No duplicates"
-        )
-    
-    with col3:
-        st.metric(
-            label="👥 Active Agents",
-            value=f"{df['Name'].nunique():,}",
-            delta=f"{len(df['Source'].unique())} teams"
-        )
-    
-    with col4:
-        completion_rate = (df["IsCompleted"].sum() / len(df)) * 100
-        st.metric(
-            label="✅ Completion Rate",
-            value=f"{completion_rate:.1f}%",
-            delta=f"{df['IsCompleted'].sum():,} of {len(df):,}"
-        )
+# ---------------- METRICS ----------------
+# Basic counts
+total_rows = len(df)
+unique_jobs = df["JobID"].nunique()
+unique_agents = df["Name"].nunique()
+date_min = df["Date"].min()
+date_max = df["Date"].max()
+print(f"\nRows: {total_rows}, Unique Jobs: {unique_jobs}, Agents: {unique_agents}, Date range: {date_min} -> {date_max}")
 
-def create_agent_performance_chart(df, top_n=10):
-    """Create interactive agent performance chart"""
-    tasks_per_agent = df.groupby("Name").agg(
-        TaskCount=("JobID", "count"),
-        Completed=("IsCompleted", "sum")
-    ).reset_index().sort_values("TaskCount", ascending=False)
-    
-    tasks_per_agent["CompletionRate"] = (tasks_per_agent["Completed"] / tasks_per_agent["TaskCount"]) * 100
-    
-    top_agents = tasks_per_agent.head(top_n)
-    
-    fig = make_subplots(
-        rows=1, cols=2,
-        subplot_titles=('Task Volume', 'Completion Rate'),
-        specs=[[{"secondary_y": False}, {"secondary_y": False}]]
-    )
-    
-    # Task volume chart
-    fig.add_trace(
-        go.Bar(
-            x=top_agents["TaskCount"],
-            y=top_agents["Name"],
-            orientation='h',
-            name="Tasks",
-            marker_color='lightblue',
-            text=top_agents["TaskCount"],
-            textposition='outside'
-        ),
-        row=1, col=1
-    )
-    
-    # Completion rate chart
-    fig.add_trace(
-        go.Bar(
-            x=top_agents["CompletionRate"],
-            y=top_agents["Name"],
-            orientation='h',
-            name="Completion %",
-            marker_color='lightgreen',
-            text=[f"{rate:.1f}%" for rate in top_agents["CompletionRate"]],
-            textposition='outside'
-        ),
-        row=1, col=2
-    )
-    
-    fig.update_layout(
-        height=600,
-        showlegend=False,
-        title_text=f"Top {top_n} Agent Performance"
-    )
-    
-    return fig
+# Tasks per agent
+tasks_per_agent = df.groupby("Name").agg(
+    TaskCount=("JobID","count"),
+    Completed=("IsCompleted","sum")
+).reset_index().sort_values("TaskCount", ascending=False)
+tasks_per_agent["CompletionRate"] = (tasks_per_agent["Completed"] / tasks_per_agent["TaskCount"]) * 100
 
-def create_team_comparison(df):
-    """Create team comparison charts"""
-    team_stats = df.groupby("Source").agg(
-        TotalTasks=("JobID", "count"),
-        CompletedTasks=("IsCompleted", "sum"),
-        UniqueAgents=("Name", "nunique")
-    ).reset_index()
-    
-    team_stats["CompletionRate"] = (team_stats["CompletedTasks"] / team_stats["TotalTasks"]) * 100
-    
-    fig = make_subplots(
-        rows=2, cols=2,
-        subplot_titles=('Tasks by Team', 'Completion Rate by Team', 'Agents by Team', 'Task Distribution'),
-        specs=[[{"type": "bar"}, {"type": "bar"}],
-               [{"type": "bar"}, {"type": "pie"}]]
-    )
-    
-    # Tasks by team
-    fig.add_trace(
-        go.Bar(x=team_stats["Source"], y=team_stats["TotalTasks"], 
-               name="Total Tasks", marker_color='skyblue'),
-        row=1, col=1
-    )
-    
-    # Completion rate by team
-    fig.add_trace(
-        go.Bar(x=team_stats["Source"], y=team_stats["CompletionRate"],
-               name="Completion Rate", marker_color='lightcoral'),
-        row=1, col=2
-    )
-    
-    # Agents by team
-    fig.add_trace(
-        go.Bar(x=team_stats["Source"], y=team_stats["UniqueAgents"],
-               name="Unique Agents", marker_color='lightgreen'),
-        row=2, col=1
-    )
-    
-    # Pie chart for task distribution
-    fig.add_trace(
-        go.Pie(labels=team_stats["Source"], values=team_stats["TotalTasks"],
-               name="Task Distribution"),
-        row=2, col=2
-    )
-    
-    fig.update_layout(height=800, showlegend=False)
-    return fig
+# Duplicate JobIDs summary
+dup_counts = df.groupby("JobID").size().reset_index(name="Count")
+dup_counts = dup_counts[dup_counts["Count"] > 1].sort_values("Count", ascending=False)
 
-def create_time_trends(df):
-    """Create time-based trend analysis"""
-    if df["Date"].isna().all():
-        st.warning("No valid dates found for trend analysis")
-        return None
-    
-    # Filter out NaT dates and create daily aggregation
-    df_with_dates = df.dropna(subset=["Date"])
-    daily_stats = df_with_dates.groupby([df_with_dates["Date"].dt.date, "Source"]).agg(
-        DailyTasks=("JobID", "count"),
-        DailyCompleted=("IsCompleted", "sum")
-    ).reset_index()
-    
-    daily_stats["CompletionRate"] = (daily_stats["DailyCompleted"] / daily_stats["DailyTasks"]) * 100
-    
-    fig = make_subplots(
-        rows=2, cols=1,
-        subplot_titles=('Daily Task Volume by Team', 'Daily Completion Rate by Team'),
-        shared_xaxes=True
-    )
-    
-    for source in daily_stats["Source"].unique():
-        source_data = daily_stats[daily_stats["Source"] == source]
-        
-        fig.add_trace(
-            go.Scatter(x=source_data["Date"], y=source_data["DailyTasks"],
-                      mode='lines+markers', name=f'{source} - Tasks'),
-            row=1, col=1
-        )
-        
-        fig.add_trace(
-            go.Scatter(x=source_data["Date"], y=source_data["CompletionRate"],
-                      mode='lines+markers', name=f'{source} - Completion %'),
-            row=2, col=1
-        )
-    
-    fig.update_layout(height=600, title_text="Trends Over Time")
-    return fig
+# Team-level stats
+team_stats = df.groupby("Source").agg(TotalTasks=("JobID","count"), CompletedTasks=("IsCompleted","sum")).reset_index()
+team_stats["CompletionRate"] = (team_stats["CompletedTasks"] / team_stats["TotalTasks"]) * 100
+print("\nTeam stats:")
+display(team_stats)
 
-def create_duplicate_analysis(df):
-    """Analyze duplicate JobIDs"""
-    dup_counts = df.groupby("JobID").size().reset_index(name="Count")
-    duplicates = dup_counts[dup_counts["Count"] > 1].sort_values("Count", ascending=False)
-    
-    if duplicates.empty:
-        st.info("No duplicate JobIDs found!")
-        return None
-    
-    # Top duplicates chart
-    top_dups = duplicates.head(10)
-    fig = px.bar(
-        top_dups, 
-        x="Count", 
-        y="JobID", 
-        orientation='h',
-        title="Top 10 Most Duplicated JobIDs",
-        color="Count",
-        color_continuous_scale="Reds"
-    )
-    fig.update_layout(height=400)
-    
-    return fig, duplicates
+# ---------------- PLOTS & ANALYSES ----------------
+# Top agents by volume
+plt.figure(figsize=(10,6))
+sns.barplot(data=tasks_per_agent.head(top_n), x="TaskCount", y="Name", palette="viridis")
+plt.title(f"Top {top_n} Agents by Task Volume")
+plt.tight_layout(); safe_show()
 
-# Main Streamlit App
-def main():
-    st.markdown('<div class="main-header">📊 GTM Team Performance Dashboard</div>', unsafe_allow_html=True)
-    
-    # Sidebar for file upload and controls
-    with st.sidebar:
-        st.header("📁 Data Upload")
-        uploaded_file = st.file_uploader(
-            "Upload Excel File",
-            type=['xlsx', 'xls'],
-            help="Upload your GTM team performance Excel file"
-        )
-        
-        if uploaded_file is not None:
-            st.success(f"File uploaded: {uploaded_file.name}")
-            
-            # Load and process data
-            with st.spinner("Processing data..."):
-                df = load_and_process_data(uploaded_file)
-            
-            if df is not None:
-                st.success(f"✅ Processed {len(df):,} records")
-                
-                # Filters
-                st.header("🔍 Filters")
-                
-                # Team filter
-                teams = ['All'] + list(df['Source'].unique())
-                selected_team = st.selectbox("Select Team", teams)
-                
-                # Date range filter
-                if not df["Date"].isna().all():
-                    date_range = st.date_input(
-                        "Date Range",
-                        value=(df["Date"].min().date(), df["Date"].max().date()),
-                        min_value=df["Date"].min().date(),
-                        max_value=df["Date"].max().date()
-                    )
-                
-                # Top N agents
-                top_n = st.slider("Top N Agents to Show", 5, 30, 10)
-                
-                # Apply filters
-                filtered_df = df.copy()
-                if selected_team != 'All':
-                    filtered_df = filtered_df[filtered_df['Source'] == selected_team]
-                
-                if not df["Date"].isna().all() and len(date_range) == 2:
-                    filtered_df = filtered_df[
-                        (filtered_df['Date'].dt.date >= date_range[0]) & 
-                        (filtered_df['Date'].dt.date <= date_range[1])
-                    ]
-                
-                # Main dashboard
-                if not filtered_df.empty:
-                    # Performance metrics
-                    st.header("📊 Key Metrics")
-                    create_performance_metrics(filtered_df)
-                    
-                    # Agent performance
-                    st.header("👤 Agent Performance")
-                    agent_chart = create_agent_performance_chart(filtered_df, top_n)
-                    st.plotly_chart(agent_chart, use_container_width=True)
-                    
-                    # Team comparison (only show if looking at all teams)
-                    if selected_team == 'All':
-                        st.header("🏆 Team Comparison")
-                        team_chart = create_team_comparison(filtered_df)
-                        st.plotly_chart(team_chart, use_container_width=True)
-                    
-                    # Time trends
-                    st.header("📈 Time Trends")
-                    trend_chart = create_time_trends(filtered_df)
-                    if trend_chart:
-                        st.plotly_chart(trend_chart, use_container_width=True)
-                    
-                    # Duplicate analysis
-                    st.header("🔍 Duplicate Analysis")
-                    dup_result = create_duplicate_analysis(filtered_df)
-                    if dup_result:
-                        dup_chart, dup_data = dup_result
-                        st.plotly_chart(dup_chart, use_container_width=True)
-                        
-                        with st.expander("View Duplicate Details"):
-                            st.dataframe(dup_data)
-                    
-                    # Detailed data view
-                    with st.expander("🔍 View Raw Data"):
-                        st.dataframe(
-                            filtered_df.head(100),
-                            use_container_width=True
-                        )
-                        
-                        if len(filtered_df) > 100:
-                            st.info(f"Showing first 100 rows of {len(filtered_df):,} total records")
-                
-                else:
-                    st.warning("No data matches the current filters.")
-        
-        else:
-            st.info("👆 Please upload an Excel file to begin analysis")
-            
-            # Show sample data format
-            with st.expander("📋 Expected Data Format"):
-                st.markdown("""
-                **Your Excel file should contain sheets with:**
-                
-                **For UFAC format (wide):**
-                - Name, Date columns
-                - Repeating job/case/comment columns
-                
-                **For AA format (long):**
-                - Name, Date, JobID, CaseCompletion columns
-                
-                **Supported sheet naming:**
-                - GTM AA, GTM UFAC, etc.
-                """)
+# Completed counts for top agents
+plt.figure(figsize=(10,6))
+sns.barplot(data=tasks_per_agent.head(top_n), x="Completed", y="Name", palette="magma")
+plt.title(f"Completed Cases by Top {top_n} Agents")
+plt.tight_layout(); safe_show()
 
-if __name__ == "__main__":
-    main()
+# Duplicates
+if not dup_counts.empty:
+    topdup = dup_counts.head(10)
+    print("\nTop duplicated JobIDs (JobID, Count):")
+    display(topdup)
+    plt.figure(figsize=(10,6))
+    sns.barplot(data=topdup, x="Count", y="JobID", palette="coolwarm")
+    plt.title("Top 10 Duplicate JobIDs")
+    plt.tight_layout(); safe_show()
+else:
+    print("\nNo duplicate JobIDs found.")
+
+# Team comparison bar
+plt.figure(figsize=(8,6))
+sns.barplot(data=team_stats, x="TotalTasks", y="Source", palette="Set2")
+plt.title("Total Tasks per Team")
+plt.tight_layout(); safe_show()
+
+# Performer segmentation per team
+tasks_per_agent_team = df.groupby(["Source","Name"]).agg(TaskCount=("JobID","count"), Completed=("IsCompleted","sum")).reset_index()
+def rank_performers_local(team_df):
+    team_df = team_df.sort_values("TaskCount", ascending=False).reset_index(drop=True)
+    n = len(team_df)
+    if n == 0:
+        return team_df
+    team_df["RankPercentile"] = (team_df.index + 1) / n * 100
+    team_df["Category"] = pd.cut(team_df["RankPercentile"], bins=[0,20,80,100], labels=["Top Performer","Mid Performer","Low Performer"])
+    return team_df
+
+ranked_performers = tasks_per_agent_team.groupby("Source", group_keys=False).apply(rank_performers_local)
+print("\nRanked performers (sample):")
+display(ranked_performers.head(40))
+
+plt.figure(figsize=(10,6))
+sns.countplot(data=ranked_performers, x="Source", hue="Category", palette="coolwarm")
+plt.title("Performer Distribution per Team")
+plt.tight_layout(); safe_show()
+
+# Team trends
+tasks_per_day_team = df.groupby(["Date","Source"])["JobID"].count().reset_index(name="DailyTasks")
+if not tasks_per_day_team.empty:
+    plt.figure(figsize=(12,6))
+    sns.lineplot(data=tasks_per_day_team, x="Date", y="DailyTasks", hue="Source", marker="o")
+    plt.title("Daily Tasks Trend per Team")
+    plt.xticks(rotation=45)
+    plt.tight_layout(); safe_show()
+else:
+    print("No date-based trend data.")
+
+# Advanced: agent consistency (boxplot of daily counts)
+daily_tasks = df.groupby(["Name","Date"])["JobID"].count().reset_index(name="DailyCount")
+if not daily_tasks.empty:
+    plt.figure(figsize=(14,6))
+    # show only top N agents to avoid overcrowding; else top contributors
+    top_agents_for_box = tasks_per_agent.head(30)["Name"].tolist()
+    box_df = daily_tasks[daily_tasks["Name"].isin(top_agents_for_box)]
+    sns.boxplot(data=box_df, x="Name", y="DailyCount")
+    plt.xticks(rotation=90)
+    plt.title("Agent daily task distribution (Top agents shown)")
+    plt.ylabel("Tasks per Day")
+    plt.tight_layout(); safe_show()
+
+# Duplicate burden by agent
+dup_agents = df[df["JobID"].isin(dup_counts["JobID"])].groupby("Name")["JobID"].count().reset_index(name="DupCount")
+if not dup_agents.empty:
+    dup_agents = dup_agents.sort_values("DupCount", ascending=False)
+    plt.figure(figsize=(10,6))
+    sns.barplot(data=dup_agents.head(top_n), x="DupCount", y="Name", palette="Reds")
+    plt.title("Top Agents by Duplicate JobIDs")
+    plt.tight_layout(); safe_show()
+else:
+    print("No duplicate burden by agent.")
+
+# Outlier scatter (tasks vs completion rate)
+tasks_per_agent["CompletionRate"] = (tasks_per_agent["Completed"] / tasks_per_agent["TaskCount"]) * 100
+plt.figure(figsize=(10,6))
+sns.scatterplot(data=tasks_per_agent, x="TaskCount", y="CompletionRate", s=100)
+plt.title("Tasks vs Completion Rate (agents)")
+plt.xlabel("Total Tasks")
+plt.ylabel("Completion Rate (%)")
+plt.tight_layout(); safe_show()
+
+# Reliability score per agent
+# Need per-agent DailyStd and DupCount
+daily_std = daily_tasks.groupby("Name")["DailyCount"].std().rename("DailyStd")
+dup_count_agent = dup_agents.set_index("Name")["DupCount"] if not dup_agents.empty else pd.Series(dtype=int)
+
+agent_metrics = tasks_per_agent.set_index("Name").join(daily_std).fillna(0)
+agent_metrics["DailyStd"] = agent_metrics["DailyStd"].fillna(0)
+agent_metrics["DupCount"] = agent_metrics.index.map(lambda n: int(dup_count_agent.get(n, 0)))
+# Avoid division by zero in normalization
+max_std = agent_metrics["DailyStd"].max() if agent_metrics["DailyStd"].max() > 0 else 1
+max_dup = agent_metrics["DupCount"].max() if agent_metrics["DupCount"].max() > 0 else 1
+
+agent_metrics["ReliabilityScore"] = (
+    (agent_metrics["CompletionRate"]/100) * 0.5 +
+    (1 - (agent_metrics["DailyStd"]/max_std)) * 0.3 +
+    (1 - (agent_metrics["DupCount"]/max_dup)) * 0.2
+) * 100
+
+top_reliable = agent_metrics.sort_values("ReliabilityScore", ascending=False).head(top_n)
+print("\nTop reliable agents (sample):")
+display(top_reliable[["TaskCount","Completed","CompletionRate","DailyStd","DupCount","ReliabilityScore"]])
+
+plt.figure(figsize=(10,6))
+sns.barplot(data=top_reliable.reset_index(), x="ReliabilityScore", y="Name", palette="Blues")
+plt.title("Top Agents With Less Duplicate Cases (composite score)")
+plt.tight_layout(); safe_show()
+
+# ---------------- UFAC team deep-dive ----------------
+ufac_df = df[df["Source"].str.contains("ufac", case=False)]
+if not ufac_df.empty:
+    print("\nUFAC-specific metrics:")
+    ufac_tasks = ufac_df.groupby("Name").agg(TaskCount=("JobID","count"), Completed=("IsCompleted","sum")).reset_index().sort_values("TaskCount", ascending=False)
+    ufac_tasks["CompletionRate"] = (ufac_tasks["Completed"]/ufac_tasks["TaskCount"])*100
+    display(ufac_tasks.head(20))
+
+    plt.figure(figsize=(10,6))
+    sns.barplot(data=ufac_tasks.head(top_n), x="TaskCount", y="Name", palette="viridis")
+    plt.title(f"Top {top_n} UFAC Agents by Task Volume")
+    plt.tight_layout(); safe_show()
+
+    plt.figure(figsize=(10,6))
+    sns.barplot(data=ufac_tasks.sort_values("CompletionRate", ascending=False).head(30), x="CompletionRate", y="Name", palette="magma")
+    plt.title("UFAC Agents: Completion Rate (%)")
+    plt.tight_layout(); safe_show()
+else:
+    print("No UFAC data found.")
+
+# ---------------- AA team deep-dive ----------------
+aa_df = df[df["Source"].str.contains("aa", case=False)]
+if not aa_df.empty:
+    print("\nAA-specific metrics:")
+    aa_tasks = aa_df.groupby("Name").agg(TaskCount=("JobID","count"), Completed=("IsCompleted","sum")).reset_index().sort_values("TaskCount", ascending=False)
+    aa_tasks["CompletionRate"] = (aa_tasks["Completed"]/aa_tasks["TaskCount"])*100
+    display(aa_tasks.head(60))
+
+    plt.figure(figsize=(10,6))
+    sns.barplot(data=aa_tasks.head(top_n), x="TaskCount", y="Name", palette="viridis")
+    plt.title(f"Top {top_n} AA Agents by Task Volume")
+    plt.tight_layout(); safe_show()
+
+    plt.figure(figsize=(10,6))
+    sns.barplot(data=aa_tasks.sort_values("CompletionRate", ascending=False).head(30), x="CompletionRate", y="Name", palette="magma")
+    plt.title("AA Agents: Completion Rate (%)")
+    plt.tight_layout(); safe_show()
+else:
+    print("No AA data found.")
+
+print("\nAnalysis finished. If some charts look crowded, reduce top_n or limit agent lists for boxplots.")
