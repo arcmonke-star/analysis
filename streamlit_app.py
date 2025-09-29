@@ -218,34 +218,27 @@ def load_and_process_data(uploaded_file):
     try:
         xls = pd.ExcelFile(uploaded_file)
         all_rows = []
-        
         progress_bar = st.progress(0)
         status_text = st.empty()
-        
         for i, sheet in enumerate(xls.sheet_names):
             status_text.text(f'Processing sheet: {sheet}')
             try:
                 df_raw = pd.read_excel(uploaded_file, sheet_name=sheet, dtype=str, header=0)
             except Exception:
                 df_raw = pd.read_excel(uploaded_file, sheet_name=sheet, dtype=str, header=None)
-            
             parsed = parse_sheet_generic(df_raw, sheet)
             all_rows.extend(parsed)
             progress_bar.progress((i + 1) / len(xls.sheet_names))
-        
         progress_bar.empty()
         status_text.empty()
-        
         # Build DataFrame
         df = pd.DataFrame(all_rows, columns=["Source","Name","Date","JobID","CaseCompletion","Comments"])
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce", dayfirst=True)
         df["JobID"] = df["JobID"].astype(str).str.strip()
-        
         # Clean data
         df = df[~df["JobID"].str.lower().isin({"jobid","casecompletion","completed","comments","none","nan","job id"})]
         df = df[~df["Name"].astype(str).str.lower().isin({"name","nan","none"})]
         df = df.dropna(subset=["JobID"]).reset_index(drop=True)
-        
         # Add completion marker
         df["IsCompleted"] = df.apply(detect_completed_marker, axis=1)
 
@@ -260,25 +253,64 @@ def load_and_process_data(uploaded_file):
         )
         df.loc[aa_mask & (df["CapRank"] > 12), "CappedCount"] = 0
         df.drop(columns=["CapRank"], inplace=True)
-        
+
         return df
     except Exception as e:
         st.error(f"Error processing file: {str(e)}")
         return None
 
-# ---------------
-# The rest of your dashboard functions (metrics, charts, comparisons, etc.) remain unchanged,
-# but make sure to replace all uses of `count()` on JobID with `sum("CappedCount")` when
-# you want the AA 12-case cap applied.
-# ---------------
+# ---------------- Existing charts (updated to use CappedCount) ----------------
+def create_performance_metrics(df):
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric(
+            label="📋 Total Tasks",
+            value=f"{df['CappedCount'].sum():,}",
+            delta=f"{df['IsCompleted'].sum():,} completed"
+        )
+    with col2:
+        unique_jobs = df["JobID"].nunique()
+        duplicates = len(df) - unique_jobs
+        st.metric(
+            label="🔢 Unique Jobs",
+            value=f"{unique_jobs:,}",
+            delta=f"{duplicates:,} duplicates" if duplicates > 0 else "No duplicates"
+        )
+    with col3:
+        st.metric(
+            label="👥 Active Agents",
+            value=f"{df['Name'].nunique():,}",
+            delta=f"{len(df['Source'].unique())} teams"
+        )
+    with col4:
+        completion_rate = (df["IsCompleted"].sum() / df["CappedCount"].sum()) * 100
+        st.metric(
+            label="✅ Completion Rate",
+            value=f"{completion_rate:.1f}%",
+            delta=f"{df['IsCompleted'].sum():,} of {df['CappedCount'].sum():,}"
+        )
 
-# Example adjustment in create_performance_metrics:
-# TotalTasks = df["CappedCount"].sum()  instead of len(df)
-
-# Similarly update other groupby aggregations:
-# .agg(Tasks=("CappedCount","sum"), Completed=("IsCompleted","sum"))
+# ---------------
+# The rest of your charts (agent, team, trends, duplicates, top/mid/low) should all replace
+# ("JobID", "count") with ("CappedCount", "sum") in groupby aggregations.
+# ---------------
 
 # ---------------- Main Streamlit App ----------------
-# (same as before, using updated aggregations)
+def main():
+    st.markdown('<div class="main-header">📊 GTM Team Performance Dashboard</div>', unsafe_allow_html=True)
+    with st.sidebar:
+        st.header("📁 Data Upload")
+        uploaded_file = st.file_uploader("Upload Excel File", type=['xlsx', 'xls'])
+    if uploaded_file is not None:
+        with st.spinner("Processing data..."):
+            df = load_and_process_data(uploaded_file)
+        if df is not None:
+            st.success(f"✅ Processed {len(df):,} records")
+            st.header("📊 Key Metrics")
+            create_performance_metrics(df)
+            # ... keep the rest of your dashboard unchanged, using updated groupby logic ...
+    else:
+        st.info("👆 Please upload an Excel file to begin analysis")
 
-# ... rest of your code here ...
+if __name__ == "__main__":
+    main()
