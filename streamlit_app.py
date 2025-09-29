@@ -2,7 +2,6 @@ import streamlit as st
 import os
 import re
 from decimal import Decimal, InvalidOperation
-import math
 import pandas as pd
 import numpy as np
 import plotly.express as px
@@ -10,7 +9,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 
-# Page config
+# ---------------- PAGE CONFIG ----------------
 st.set_page_config(
     page_title="GTM Team Performance Dashboard",
     page_icon="📊",
@@ -18,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
+# ---------------- STYLING ----------------
 st.markdown("""
 <style>
 .main-header {
@@ -43,8 +42,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-
-# ---------------- Helper functions ----------------
+# ---------------- HELPER FUNCTIONS ----------------
 @st.cache_data
 def normalize_jobid(val):
     if pd.isna(val):
@@ -65,18 +63,23 @@ def normalize_jobid(val):
     s = re.sub(r'\.0+$', '', s)
     return s
 
-
 @st.cache_data
 def detect_completed_marker(row):
-    source = row["Source"].lower()
-    s = str(row.get("CaseCompletion", "")).strip().lower()
-
-    if "aa" in source:
-        return s.startswith("completed") and "not" not in s and "incomplete" not in s
-    if "ufac" in source:
-        return s == "completed"
+    source = row["Source"]
+    if "aa" in source.lower():
+        s = row["CaseCompletion"]
+        if s is None or pd.isna(s):
+            return False
+        s_lower = str(s).strip().lower()
+        if "completed" in s_lower:
+            return "not" not in s_lower and "incomplete" not in s_lower
+        return False
+    if "ufac" in source.lower():
+        jobid = str(row["JobID"]).strip().lower()
+        if jobid.isnumeric():
+            return False
+        return True
     return False
-
 
 @st.cache_data
 def load_and_process_data(uploaded_file):
@@ -88,161 +91,123 @@ def load_and_process_data(uploaded_file):
                 df_raw = pd.read_excel(uploaded_file, sheet_name=sheet, dtype=str, header=0)
             except Exception:
                 df_raw = pd.read_excel(uploaded_file, sheet_name=sheet, dtype=str, header=None)
-            # very simplified parsing for brevity
+
             for _, row in df_raw.iterrows():
-                if row.isna().all():
-                    continue
-                all_rows.append({
-                    "Source": sheet,
-                    "Name": row.iloc[0],
-                    "Date": row.iloc[1] if len(row) > 1 else None,
-                    "JobID": normalize_jobid(row.iloc[2]) if len(row) > 2 else None,
-                    "CaseCompletion": row.iloc[3] if len(row) > 3 else None,
-                    "Comments": row.iloc[4] if len(row) > 4 else None
-                })
+                name = row.iloc[0] if df_raw.shape[1] > 0 else None
+                date = row.iloc[1] if df_raw.shape[1] > 1 else None
+                for val in row.iloc[2:]:
+                    if pd.isna(val) or str(val).strip() == "":
+                        continue
+                    all_rows.append({
+                        "Source": sheet,
+                        "Name": str(name).strip() if pd.notna(name) else None,
+                        "Date": date,
+                        "JobID": normalize_jobid(val),
+                        "CaseCompletion": None,
+                        "Comments": None
+                    })
 
-        df = pd.DataFrame(all_rows, columns=["Source", "Name", "Date", "JobID", "CaseCompletion", "Comments"])
+        df = pd.DataFrame(all_rows, columns=["Source","Name","Date","JobID","CaseCompletion","Comments"])
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce", dayfirst=True)
+        df["JobID"] = df["JobID"].astype(str).str.strip()
         df = df.dropna(subset=["JobID"]).reset_index(drop=True)
-
-        # Completion flag
         df["IsCompleted"] = df.apply(detect_completed_marker, axis=1)
-
-        # --- Apply GTM AA daily cap: max 12 cases per agent per day
-        df["CappedCount"] = 1
-        aa_mask = df["Source"].str.contains("aa", case=False, na=False)
-        df.loc[aa_mask, "CapRank"] = (
-            df[aa_mask]
-            .sort_values(["Date", "Name"])
-            .groupby([df["Date"], df["Name"]])
-            .cumcount() + 1
-        )
-        df.loc[aa_mask & (df["CapRank"] > 12), "CappedCount"] = 0
-        df.drop(columns=["CapRank"], inplace=True)
-
         return df
     except Exception as e:
         st.error(f"Error processing file: {str(e)}")
         return None
 
-
-# ---------------- Chart Functions ----------------
+# ---------------- EXISTING CHARTS ----------------
 def create_performance_metrics(df):
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("📋 Total Tasks", f"{df['CappedCount'].sum():,}", delta=f"{df['IsCompleted'].sum():,} completed")
+        st.metric("📋 Total Tasks", f"{len(df):,}", f"{df['IsCompleted'].sum():,} completed")
     with col2:
         unique_jobs = df["JobID"].nunique()
         duplicates = len(df) - unique_jobs
-        st.metric("🔢 Unique Jobs", f"{unique_jobs:,}", delta=f"{duplicates:,} duplicates" if duplicates > 0 else "No duplicates")
+        st.metric("🔢 Unique Jobs", f"{unique_jobs:,}", f"{duplicates:,} duplicates" if duplicates > 0 else "No duplicates")
     with col3:
-        st.metric("👥 Active Agents", f"{df['Name'].nunique():,}", delta=f"{len(df['Source'].unique())} teams")
+        st.metric("👥 Active Agents", f"{df['Name'].nunique():,}", f"{len(df['Source'].unique())} teams")
     with col4:
-        completion_rate = (df["IsCompleted"].sum() / df["CappedCount"].sum()) * 100 if df["CappedCount"].sum() > 0 else 0
-        st.metric("✅ Completion Rate", f"{completion_rate:.1f}%", delta=f"{df['IsCompleted'].sum():,} of {df['CappedCount'].sum():,}")
-
+        completion_rate = (df["IsCompleted"].sum() / len(df)) * 100
+        st.metric("✅ Completion Rate", f"{completion_rate:.1f}%", f"{df['IsCompleted'].sum():,} of {len(df):,}")
 
 def create_agent_performance_chart(df, top_n=10):
     tasks_per_agent = df.groupby("Name").agg(
-        TaskCount=("CappedCount", "sum"),
+        TaskCount=("JobID", "count"),
         Completed=("IsCompleted", "sum")
     ).reset_index().sort_values("TaskCount", ascending=False)
     tasks_per_agent["CompletionRate"] = (tasks_per_agent["Completed"] / tasks_per_agent["TaskCount"]) * 100
     top_agents = tasks_per_agent.head(top_n)
 
     fig = make_subplots(rows=1, cols=2, subplot_titles=('Task Volume', 'Completion Rate'))
-    fig.add_trace(go.Bar(x=top_agents["TaskCount"], y=top_agents["Name"], orientation='h', name="Tasks"), row=1, col=1)
-    fig.add_trace(go.Bar(x=top_agents["CompletionRate"], y=top_agents["Name"], orientation='h', name="Completion %"), row=1, col=2)
-    fig.update_layout(height=600, showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
-
+    fig.add_trace(go.Bar(x=top_agents["TaskCount"], y=top_agents["Name"], orientation='h', name="Tasks", marker_color='lightblue'), row=1, col=1)
+    fig.add_trace(go.Bar(x=top_agents["CompletionRate"], y=top_agents["Name"], orientation='h', name="Completion %", marker_color='lightgreen'), row=1, col=2)
+    fig.update_layout(height=600, showlegend=False, title_text=f"Top {top_n} Agent Performance")
+    return fig
 
 def create_team_comparison(df):
     team_stats = df.groupby("Source").agg(
-        TotalTasks=("CappedCount", "sum"),
+        TotalTasks=("JobID", "count"),
         CompletedTasks=("IsCompleted", "sum"),
         UniqueAgents=("Name", "nunique")
     ).reset_index()
     team_stats["CompletionRate"] = (team_stats["CompletedTasks"] / team_stats["TotalTasks"]) * 100
 
-    fig = make_subplots(rows=2, cols=2, subplot_titles=('Tasks by Team', 'Completion Rate by Team', 'Agents by Team', 'Task Distribution'))
+    fig = make_subplots(
+        rows=2, cols=2,
+        specs=[[{}, {}], [{}, {"type": "domain"}]],
+        subplot_titles=('Tasks by Team', 'Completion Rate by Team', 'Agents by Team', 'Task Distribution')
+    )
     fig.add_trace(go.Bar(x=team_stats["Source"], y=team_stats["TotalTasks"]), row=1, col=1)
     fig.add_trace(go.Bar(x=team_stats["Source"], y=team_stats["CompletionRate"]), row=1, col=2)
     fig.add_trace(go.Bar(x=team_stats["Source"], y=team_stats["UniqueAgents"]), row=2, col=1)
     fig.add_trace(go.Pie(labels=team_stats["Source"], values=team_stats["TotalTasks"]), row=2, col=2)
     fig.update_layout(height=800, showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
+    return fig
 
-
-def create_time_trends(df):
-    if df["Date"].isna().all():
-        st.warning("No valid dates for trends")
-        return
-    daily_stats = df.groupby([df["Date"].dt.date, "Source"]).agg(
-        DailyTasks=("CappedCount", "sum"),
-        DailyCompleted=("IsCompleted", "sum")
-    ).reset_index()
-    daily_stats["CompletionRate"] = (daily_stats["DailyCompleted"] / daily_stats["DailyTasks"]) * 100
-
-    fig = make_subplots(rows=2, cols=1, subplot_titles=('Daily Task Volume', 'Completion Rate'), shared_xaxes=True)
-    for source in daily_stats["Source"].unique():
-        sd = daily_stats[daily_stats["Source"] == source]
-        fig.add_trace(go.Scatter(x=sd["Date"], y=sd["DailyTasks"], mode='lines+markers', name=f"{source} Tasks"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=sd["Date"], y=sd["CompletionRate"], mode='lines+markers', name=f"{source} %"), row=2, col=1)
-    fig.update_layout(height=600)
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def create_duplicate_analysis(df):
-    dup_counts = df.groupby("JobID").size().reset_index(name="Count")
-    duplicates = dup_counts[dup_counts["Count"] > 1]
-    if duplicates.empty:
-        st.info("No duplicate JobIDs found")
-        return
-    top_dups = duplicates.sort_values("Count", ascending=False).head(10)
-    fig = px.bar(top_dups, x="Count", y="JobID", orientation='h', title="Top 10 Duplicates")
-    st.plotly_chart(fig, use_container_width=True)
-
-
-# ----------- Top / Mid / Low performers ------------
+# ---------------- NEW: TOP/MID/LOW ----------------
 def split_agents_by_performance(df, freq="W"):
-    df_with_dates = df.dropna(subset=["Date"]).copy()
-    agg = df_with_dates.groupby([pd.Grouper(key="Date", freq=freq), "Source", "Name"]).agg(
-        Tasks=("CappedCount", "sum"),
-        Completed=("IsCompleted", "sum")
+    df_with_dates = df.dropna(subset=["Date"])
+    grouped = df_with_dates.groupby([pd.Grouper(key="Date", freq=freq), "Source", "Name"]).agg(
+        TaskCount=("JobID","count"),
+        Completed=("IsCompleted","sum")
     ).reset_index()
-    agg["CompletionRate"] = (agg["Completed"] / agg["Tasks"]) * 100
-    results = []
-    for (period, team), group in agg.groupby(["Date", "Source"]):
-        g = group.sort_values("Tasks", ascending=False).reset_index(drop=True)
-        n = len(g)
+    grouped["CompletionRate"] = (grouped["Completed"] / grouped["TaskCount"]) * 100
+
+    results = {}
+    for (period, team), sub in grouped.groupby(["Date", "Source"]):
+        sub_sorted = sub.sort_values("TaskCount", ascending=False).reset_index(drop=True)
+        n = len(sub_sorted)
         if n == 0: continue
-        top = g.iloc[:math.ceil(n/3)]
-        mid = g.iloc[math.ceil(n/3):math.ceil(2*n/3)]
-        low = g.iloc[math.ceil(2*n/3):]
-        results.append({"Period": period, "Team": team, "Top": top, "Mid": mid, "Low": low})
+        top_n = max(1, n//3)
+        results[(period, team)] = {
+            "Top": sub_sorted.head(top_n),
+            "Mid": sub_sorted.iloc[top_n:2*top_n],
+            "Low": sub_sorted.iloc[2*top_n:]
+        }
     return results
 
+def display_agent_split_tables(splits, label):
+    for (period, team), tiers in splits.items():
+        st.subheader(f"{label} – {team} – {period.strftime('%Y-%m-%d')}")
+        col1, col2, col3 = st.columns(3)
+        for col, tier in zip([col1, col2, col3], ["Top","Mid","Low"]):
+            with col:
+                st.markdown(f"**{tier} Performers**")
+                st.dataframe(tiers[tier][["Name","TaskCount","Completed","CompletionRate"]])
 
-def display_agent_split_tables(splits, label=""):
-    for s in splits:
-        with st.expander(f"{s['Team']} — period {s['Period']}"):
-            for tier, df_tier in [("Top", s["Top"]), ("Mid", s["Mid"]), ("Low", s["Low"])]:
-                st.write(f"{tier} performers")
-                if not df_tier.empty:
-                    show = df_tier[["Name", "Tasks", "Completed", "CompletionRate"]].copy()
-                    show["CompletionRate"] = show["CompletionRate"].round(1)
-                    st.dataframe(show)
-                else:
-                    st.write("No data")
-
-
-# ---------------- Main App ----------------
+# ---------------- MAIN APP ----------------
 def main():
     st.markdown('<div class="main-header">📊 GTM Team Performance Dashboard</div>', unsafe_allow_html=True)
+
     with st.sidebar:
-        st.header("📁 Upload File")
-        uploaded_file = st.file_uploader("Upload Excel", type=['xlsx', 'xls'])
+        st.header("📁 Data Upload")
+        uploaded_file = st.file_uploader("Upload Excel File", type=['xlsx','xls'])
+        st.header("🔍 Filters")
+        period_option = st.selectbox("Select Period", ["Weekly","Monthly","Yearly"], index=0)
+        freq_map = {"Weekly":"W","Monthly":"M","Yearly":"Y"}
+        selected_freq = freq_map[period_option]
 
     if uploaded_file is not None:
         df = load_and_process_data(uploaded_file)
@@ -251,25 +216,21 @@ def main():
             create_performance_metrics(df)
 
             st.header("👤 Agent Performance")
-            create_agent_performance_chart(df)
+            st.plotly_chart(create_agent_performance_chart(df, top_n=10), use_container_width=True)
 
             st.header("🏆 Team Comparison")
-            create_team_comparison(df)
+            st.plotly_chart(create_team_comparison(df), use_container_width=True)
 
-            st.header("📈 Trends")
-            create_time_trends(df)
+            st.header(f"🌟 Top / Mid / Low Performers ({period_option})")
+            splits = split_agents_by_performance(df, freq=selected_freq)
+            display_agent_split_tables(splits, period_option)
 
-            st.header("🔍 Duplicate Analysis")
-            create_duplicate_analysis(df)
-
-            st.header("⭐ Top/Mid/Low Performers")
-            splits = split_agents_by_performance(df, freq="W")
-            display_agent_split_tables(splits, "Weekly")
+            with st.expander("🔍 View Raw Data"):
+                st.dataframe(df.head(200), use_container_width=True)
         else:
-            st.warning("No valid records after processing.")
+            st.warning("No valid records found in uploaded file")
     else:
-        st.info("Please upload a file to start.")
-
+        st.info("👆 Please upload an Excel file to begin analysis")
 
 if __name__ == "__main__":
     main()
