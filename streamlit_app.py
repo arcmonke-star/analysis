@@ -23,11 +23,11 @@ st.set_page_config(
 st.markdown("""
 <style>
     .main-header {
-        font-size: 2.4rem;
+        font-size: 3rem;
         font-weight: bold;
         text-align: center;
         color: #1f77b4;
-        margin-bottom: 1.5rem;
+        margin-bottom: 2rem;
     }
     .metric-card {
         background-color: #f0f2f6;
@@ -44,7 +44,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------- Helper functions ----------------
+# Helper functions
 @st.cache_data
 def normalize_jobid(val):
     if pd.isna(val):
@@ -253,7 +253,6 @@ def load_and_process_data(uploaded_file):
         st.error(f"Error processing file: {str(e)}")
         return None
 
-# ---------------- Existing charts ----------------
 def create_performance_metrics(df):
     """Create performance metrics cards"""
     col1, col2, col3, col4 = st.columns(4)
@@ -453,120 +452,11 @@ def create_duplicate_analysis(df):
     
     return fig, duplicates
 
-# ---------------- New Team Insights functions ----------------
-def create_team_overview(df):
-    """Completion rate per team (sorted)"""
-    team_stats = df.groupby("Source").agg(
-        TotalTasks=("JobID", "count"),
-        Completed=("IsCompleted", "sum")
-    ).reset_index()
-    team_stats["CompletionRate"] = (team_stats["Completed"] / team_stats["TotalTasks"]) * 100
-    team_stats = team_stats.sort_values("CompletionRate", ascending=False)
-    
-    fig = px.bar(
-        team_stats,
-        x="CompletionRate",
-        y="Source",
-        orientation="h",
-        title="Team Completion Rate (sorted)",
-        text="CompletionRate"
-    )
-    fig.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
-    fig.update_layout(height=450, xaxis_title="Completion Rate (%)", yaxis_title="")
-    return fig, team_stats
-
-def create_team_top_performers(df, top_n=5):
-    """Top N performers per team: task count and completion rate"""
-    team_groups = df.groupby(["Source", "Name"]).agg(
-        TaskCount=("JobID", "count"),
-        Completed=("IsCompleted", "sum")
-    ).reset_index()
-    team_groups["CompletionRate"] = (team_groups["Completed"] / team_groups["TaskCount"]) * 100
-
-    # Keep top_n by TaskCount for each team
-    top_performers = team_groups.sort_values(["Source", "TaskCount"], ascending=[True, False]).groupby("Source").head(top_n)
-
-    if top_performers.empty:
-        return None
-
-    # Use facet to create small multiples (one facet per team)
-    fig = px.bar(
-        top_performers,
-        x="TaskCount",
-        y="Name",
-        color="CompletionRate",
-        facet_col="Source",
-        orientation="h",
-        text="CompletionRate",
-        title=f"Top {top_n} Performers per Team (by Task Count)"
-    )
-    fig.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
-    fig.update_layout(height=500, showlegend=False)
-    return fig
-
-def create_team_contribution_pie(df):
-    """Pie showing each team's share of total tasks"""
-    team_totals = df.groupby("Source").agg(TotalTasks=("JobID","count")).reset_index()
-    fig = px.pie(team_totals, names="Source", values="TotalTasks", title="Team Share of Total Tasks")
-    fig.update_traces(textposition='inside', textinfo='percent+label')
-    fig.update_layout(height=400)
-    return fig
-
-def create_team_trends_small_multiples(df):
-    """Create small-multiple line charts for team daily tasks (compact view)"""
-    df_with_dates = df.dropna(subset=["Date"])
-    if df_with_dates.empty:
-        return None
-    daily_stats = df_with_dates.groupby([df_with_dates["Date"].dt.date, "Source"]).agg(
-        DailyTasks=("JobID","count"),
-        DailyCompleted=("IsCompleted","sum")
-    ).reset_index()
-    daily_stats["CompletionRate"] = (daily_stats["DailyCompleted"] / daily_stats["DailyTasks"]) * 100
-
-    # Daily tasks line with facets per team
-    fig = px.line(
-        daily_stats,
-        x="Date",
-        y="DailyTasks",
-        color="Source",
-        facet_col="Source",
-        facet_col_wrap=3,
-        title="Daily Task Volume (small multiples by Team)"
-    )
-    fig.update_layout(height=600, showlegend=False)
-    return fig
-
-def create_duplicates_heatmap(df, top_n_jobids=20):
-    """Create heatmap of duplicate JobIDs across teams"""
-    dup_counts = df.groupby("JobID").size().reset_index(name="Count")
-    dup_jobids = dup_counts[dup_counts["Count"] > 1]["JobID"].head(top_n_jobids)
-
-    df["dup_flag"] = 1  # temporary marker for counting
-    pivot = df[df["JobID"].isin(dup_jobids)].pivot_table(
-        index="JobID",
-        columns="Source",
-        values="dup_flag",
-        aggfunc="sum",
-        fill_value=0
-    )
-
-    if pivot.empty:
-        return None
-
-    fig = px.imshow(
-        pivot,
-        text_auto=True,
-        aspect="auto",
-        color_continuous_scale="Reds",
-        title="🔍 Duplicate JobID Heatmap (Top Duplicates across Teams)"
-    )
-    return fig
-
-# ---------------- Main Streamlit App ----------------
+# Main Streamlit App
 def main():
     st.markdown('<div class="main-header">📊 GTM Team Performance Dashboard</div>', unsafe_allow_html=True)
-
-    # Sidebar: file upload
+    
+    # Sidebar for file upload and controls
     with st.sidebar:
         st.header("📁 Data Upload")
         uploaded_file = st.file_uploader(
@@ -574,27 +464,25 @@ def main():
             type=['xlsx', 'xls'],
             help="Upload your GTM team performance Excel file"
         )
-
-    # If a file is uploaded
-    if uploaded_file is not None:
-        st.success(f"File uploaded: {uploaded_file.name}")
-
-        # Load and process
-        with st.spinner("Processing data..."):
-            df = load_and_process_data(uploaded_file)
-
-        if df is not None:
-            st.success(f"✅ Processed {len(df):,} records")
-
-            # Sidebar filters
-            with st.sidebar:
+        
+        if uploaded_file is not None:
+            st.success(f"File uploaded: {uploaded_file.name}")
+            
+            # Load and process data
+            with st.spinner("Processing data..."):
+                df = load_and_process_data(uploaded_file)
+            
+            if df is not None:
+                st.success(f"✅ Processed {len(df):,} records")
+                
+                # Filters
                 st.header("🔍 Filters")
-
+                
                 # Team filter
-                teams = ['All'] + sorted(list(df['Source'].unique()))
+                teams = ['All'] + list(df['Source'].unique())
                 selected_team = st.selectbox("Select Team", teams)
-
-                # Date filter
+                
+                # Date range filter
                 if not df["Date"].isna().all():
                     date_range = st.date_input(
                         "Date Range",
@@ -602,123 +490,85 @@ def main():
                         min_value=df["Date"].min().date(),
                         max_value=df["Date"].max().date()
                     )
-                else:
-                    date_range = None
-
+                
                 # Top N agents
-                top_n = st.slider("Top N Agents to Show", 3, 30, 10)
-
-            # Apply filters
-            filtered_df = df.copy()
-            if selected_team != 'All':
-                filtered_df = filtered_df[filtered_df['Source'] == selected_team]
-            if date_range and len(date_range) == 2:
-                filtered_df = filtered_df[
-                    (filtered_df['Date'].dt.date >= date_range[0]) &
-                    (filtered_df['Date'].dt.date <= date_range[1])
-                ]
-
-            # ----------------- MAIN DASHBOARD -----------------
-            if not filtered_df.empty:
-                # Metrics
-                st.header("📊 Key Metrics")
-                create_performance_metrics(filtered_df)
-
-                # Agent performance
-                st.header("👤 Agent Performance")
-                agent_chart = create_agent_performance_chart(filtered_df, top_n)
-                st.plotly_chart(agent_chart, use_container_width=True)
-
-                # If viewing all teams, show team-level insights
-                if selected_team == 'All':
-                    st.header("🏆 Team Comparison")
-                    team_chart = create_team_comparison(filtered_df)
-                    st.plotly_chart(team_chart, use_container_width=True)
-
-                    # Team overview (completion rate)
-                    st.subheader("Team Completion Rates")
-                    overview_fig, team_stats = create_team_overview(filtered_df)
-                    st.plotly_chart(overview_fig, use_container_width=True)
-                    with st.expander("View Team Stats Table"):
-                        st.dataframe(team_stats)
-
-                    # Top performers per team
-                    st.subheader("🌟 Top Performers per Team")
-                    top_perf_fig = create_team_top_performers(filtered_df, top_n=top_n if top_n<=20 else 20)
-                    if top_perf_fig is not None:
-                        st.plotly_chart(top_perf_fig, use_container_width=True)
-
-                    # Team contribution pie
-                    st.subheader("📌 Team Contribution")
-                    pie_fig = create_team_contribution_pie(filtered_df)
-                    st.plotly_chart(pie_fig, use_container_width=True)
-
-                    # Team small-multiple trends
-                    st.subheader("📈 Team Trends (small multiples)")
-                    small_trends = create_team_trends_small_multiples(filtered_df)
-                    if small_trends:
-                        st.plotly_chart(small_trends, use_container_width=True)
-
-                    # Duplicate heatmap
-                    st.subheader("🔍 Duplicate JobID Heatmap")
-                    dup_heat = create_duplicates_heatmap(filtered_df, top_n_jobids=20)
-                    if dup_heat:
-                        st.plotly_chart(dup_heat, use_container_width=True)
-                    else:
-                        st.info("No duplicated JobIDs to display in heatmap.")
-
-                else:
-                    # If a single team selected, show team-specific insights
-                    st.subheader(f"Team: {selected_team} — Breakdown")
-                    # Top performers within the selected team
-                    single_team_top = create_team_top_performers(filtered_df, top_n=top_n)
-                    if single_team_top:
-                        st.plotly_chart(single_team_top, use_container_width=True)
-
-                    # Team trends (use the general time_trends function but filtered)
-                    st.subheader("Team Trends Over Time")
-                    team_trend_fig = create_time_trends(filtered_df)
-                    if team_trend_fig:
-                        st.plotly_chart(team_trend_fig, use_container_width=True)
-
-                    # Duplicate analysis for team
-                    st.subheader("Duplicate Analysis (Team)")
+                top_n = st.slider("Top N Agents to Show", 5, 30, 10)
+                
+                # Apply filters
+                filtered_df = df.copy()
+                if selected_team != 'All':
+                    filtered_df = filtered_df[filtered_df['Source'] == selected_team]
+                
+                if not df["Date"].isna().all() and len(date_range) == 2:
+                    filtered_df = filtered_df[
+                        (filtered_df['Date'].dt.date >= date_range[0]) & 
+                        (filtered_df['Date'].dt.date <= date_range[1])
+                    ]
+                
+                # Main dashboard
+                if not filtered_df.empty:
+                    # Performance metrics
+                    st.header("📊 Key Metrics")
+                    create_performance_metrics(filtered_df)
+                    
+                    # Agent performance
+                    st.header("👤 Agent Performance")
+                    agent_chart = create_agent_performance_chart(filtered_df, top_n)
+                    st.plotly_chart(agent_chart, use_container_width=True)
+                    
+                    # Team comparison (only show if looking at all teams)
+                    if selected_team == 'All':
+                        st.header("🏆 Team Comparison")
+                        team_chart = create_team_comparison(filtered_df)
+                        st.plotly_chart(team_chart, use_container_width=True)
+                    
+                    # Time trends
+                    st.header("📈 Time Trends")
+                    trend_chart = create_time_trends(filtered_df)
+                    if trend_chart:
+                        st.plotly_chart(trend_chart, use_container_width=True)
+                    
+                    # Duplicate analysis
+                    st.header("🔍 Duplicate Analysis")
                     dup_result = create_duplicate_analysis(filtered_df)
                     if dup_result:
                         dup_chart, dup_data = dup_result
                         st.plotly_chart(dup_chart, use_container_width=True)
+                        
                         with st.expander("View Duplicate Details"):
                             st.dataframe(dup_data)
-                    else:
-                        st.info("No duplicates for this team.")
-
-                # Raw data view
-                with st.expander("🔍 View Raw Data"):
-                    st.dataframe(filtered_df.head(200), use_container_width=True)
-                    if len(filtered_df) > 200:
-                        st.info(f"Showing first 200 rows of {len(filtered_df):,} total records")
-            else:
-                st.warning("No data matches the current filters.")
-
-    # If no file is uploaded
-    else:
-        st.info("👆 Please upload an Excel file to begin analysis")
-
-        # Show expected data format
-        with st.expander("📋 Expected Data Format"):
-            st.markdown("""
-            **Your Excel file should contain sheets with:**
-
-            **For UFAC format (wide):**
-            - Name, Date columns
-            - Repeating job/case/comment columns
-
-            **For AA format (long):**
-            - Name, Date, JobID, CaseCompletion columns
-
-            **Supported sheet naming:**
-            - GTM AA, GTM UFAC, etc.
-            """)
+                    
+                    # Detailed data view
+                    with st.expander("🔍 View Raw Data"):
+                        st.dataframe(
+                            filtered_df.head(100),
+                            use_container_width=True
+                        )
+                        
+                        if len(filtered_df) > 100:
+                            st.info(f"Showing first 100 rows of {len(filtered_df):,} total records")
+                
+                else:
+                    st.warning("No data matches the current filters.")
+        
+        else:
+            st.info("👆 Please upload an Excel file to begin analysis")
+            
+            # Show sample data format
+            with st.expander("📋 Expected Data Format"):
+                st.markdown("""
+                **Your Excel file should contain sheets with:**
+                
+                **For UFAC format (wide):**
+                - Name, Date columns
+                - Repeating job/case/comment columns
+                
+                **For AA format (long):**
+                - Name, Date, JobID, CaseCompletion columns
+                
+                **Supported sheet naming:**
+                - GTM AA, GTM UFAC, etc.
+                """)
 
 if __name__ == "__main__":
     main()
